@@ -446,7 +446,10 @@ class SortTest(unittest.TestCase):
 
     def test_enable_sorting(self):
         keys = sorted(chr(x) for x in range(32, 128) if x != ord('/'))
-        t = pygtrie.StringTrie.fromkeys(keys)
+        # Insert in non-sorted order: since Python 3.7 dicts preserve
+        # insertion order, inserting already-sorted keys would make the
+        # default iteration order sorted as well.
+        t = pygtrie.StringTrie.fromkeys(reversed(keys))
 
         # Unless dict's hash function is weird, trie's keys should not be
         # returned in order.
@@ -593,6 +596,81 @@ class RecursionTest(unittest.TestCase):
 
     def test_copy(self):
         self.create_trie().copy()
+
+
+class FuzzyItemsTest(unittest.TestCase):
+
+    def setUp(self):
+        self.trie = pygtrie.CharTrie((
+            ('cat', 1), ('cats', 2), ('car', 3), ('card', 4),
+            ('cart', 5), ('dog', 6), ('door', 7)))
+
+    def test_zero_distance_matches_exact_prefix(self):
+        for prefix in ('', 'c', 'ca', 'cat', 'cats', 'do'):
+            self.assertEqual(sorted(self.trie.items(prefix=prefix)),
+                             self.trie.fuzzy_items(prefix, 0))
+        # A prefix absent from the trie yields no items.
+        self.assertEqual([], self.trie.fuzzy_items('xyz', 0))
+
+    def test_substitution_off_by_one_and_two(self):
+        # 'cot' is one substitution away from 'cat' (and thus from 'cats'
+        # via its 'cat' prefix) and two steps away from the other words.
+        self.assertEqual([('cat', 1), ('cats', 2)],
+                         self.trie.fuzzy_items('cot', 1))
+        self.assertEqual(
+            [('cat', 1), ('cats', 2), ('car', 3), ('card', 4), ('cart', 5),
+             ('dog', 6), ('door', 7)],
+            self.trie.fuzzy_items('cot', 2))
+
+    def test_insertion_and_deletion(self):
+        # 'cats' -> 'cat' is one deletion; 'car' and 'cart' are two steps
+        # away from 'cats'.
+        self.assertEqual([('cats', 2), ('cat', 1)],
+                         self.trie.fuzzy_items('cats', 1))
+        self.assertEqual(
+            [('cats', 2), ('cat', 1), ('car', 3), ('card', 4), ('cart', 5)],
+            self.trie.fuzzy_items('cats', 2))
+        # 'at' is one insertion away from 'cat' (and thus 'cats').
+        self.assertEqual([('cat', 1), ('cats', 2)],
+                         self.trie.fuzzy_items('at', 1))
+
+    def test_beyond_distance_not_returned(self):
+        keys = [key for key, _ in self.trie.fuzzy_items('cot', 1)]
+        self.assertNotIn('dog', keys)
+        self.assertNotIn('door', keys)
+
+    def test_distance_beats_key_ordering(self):
+        t = pygtrie.CharTrie((('ab', 1), ('zb', 2)))
+        self.assertEqual([('zb', 2), ('ab', 1)], t.fuzzy_items('zb', 1))
+
+    def test_empty_prefix_matches_everything(self):
+        self.assertEqual(sorted(self.trie.items()),
+                         self.trie.fuzzy_items('', 0))
+        self.assertEqual(sorted(self.trie.items()),
+                         self.trie.fuzzy_items('', 2))
+
+    def test_empty_trie(self):
+        t = pygtrie.CharTrie()
+        self.assertEqual([], t.fuzzy_items('cat', 2))
+        self.assertEqual([], t.fuzzy_items('', 0))
+
+    def test_limit(self):
+        full = self.trie.fuzzy_items('cot', 2)
+        self.assertEqual(full[:3], self.trie.fuzzy_items('cot', 2, limit=3))
+        self.assertEqual([], self.trie.fuzzy_items('cot', 2, limit=0))
+
+    def test_string_trie(self):
+        t = pygtrie.StringTrie()
+        t['foo/bar'] = 1
+        t['foo/baz'] = 2
+        t['foo/qux'] = 3
+        self.assertEqual([('foo/baz', 2), ('foo/bar', 1), ('foo/qux', 3)],
+                         t.fuzzy_items('foo/baz', 1))
+
+    def test_invalid_arguments(self):
+        self.assertRaises(ValueError, self.trie.fuzzy_items, 'cat', -1)
+        self.assertRaises(ValueError, self.trie.fuzzy_items,
+                          'cat', 1, limit=-1)
 
 
 if __name__ == '__main__':

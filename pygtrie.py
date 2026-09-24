@@ -39,7 +39,10 @@ __author__ = 'Michal Nazarewicz <mina86@mina86.com>'
 __copyright__ = 'Copyright 2014 Google Inc.'
 
 
-import collections as _collections
+try:
+    import collections.abc as _collections_abc
+except ImportError:  # Python 2.6/2.7 compatibility
+    import collections as _collections_abc
 
 # Python 2.x and 3.x compatibility stuff
 if hasattr(dict, 'iteritems'):
@@ -281,7 +284,7 @@ _NONE_PAIR = type('NonePair', (tuple,), {
 })((None, None))
 
 
-class Trie(_collections.MutableMapping):
+class Trie(_collections_abc.MutableMapping):
     """A trie implementation with dict interface plus some extensions.
 
     Keys used with the :class:`pygtrie.Trie` must be iterable, yielding hashable
@@ -980,6 +983,113 @@ class Trie(_collections.MutableMapping):
             pass
         return ret
 
+    def fuzzy_items(self, prefix, max_distance, limit=None):
+        """Finds items whose key has a prefix within given edit distance.
+
+        Performs a fuzzy prefix look-up: an item matches if some prefix of
+        its key is within Levenshtein distance ``max_distance`` of ``prefix``
+        (insertions, deletions and substitutions each count as one step).
+        Each matching item's distance is the minimum distance over all
+        prefixes of its key (the empty prefix and the key itself included).
+
+        The search walks the trie while carrying a row of the edit-distance
+        dynamic-programming table, pruning any subtree whose row's minimum
+        already exceeds ``max_distance`` -- no extension of such a path can
+        ever qualify, so the whole trie is never flattened.
+
+        Edge cases:
+
+        - An empty ``prefix`` matches every key with distance zero (the
+          empty string is a prefix of every key).
+        - ``max_distance`` of zero degenerates to an exact prefix match,
+          i.e. the same set of keys as ``t.items(prefix=prefix)``.
+        - An empty trie yields no items.
+
+        Example:
+
+            >>> import pygtrie
+            >>> t = pygtrie.CharTrie()
+            >>> t['cat'] = 1; t['cats'] = 2; t['dog'] = 3
+            >>> t.fuzzy_items('cat', 0)
+            [('cat', 1), ('cats', 2)]
+            >>> t.fuzzy_items('cot', 1)
+            [('cat', 1), ('cats', 1)]
+
+        Args:
+            prefix: Query prefix to match against.
+            max_distance: Maximum allowed edit distance; must be
+                a non-negative integer.
+            limit: Optional maximum number of items to return.  ``None``
+                (the default) means no limit.
+
+        Returns:
+            A list of ``(key, value)`` tuples sorted by ascending distance,
+            with ties broken by key.  If ``limit`` is given, at most that
+            many items (the closest ones) are returned.
+
+        Raises:
+            ValueError: If ``max_distance`` or ``limit`` is negative.
+        """
+        if max_distance < 0:
+            raise ValueError('max_distance must be non-negative')
+        if limit is not None and limit < 0:
+            raise ValueError('limit must be non-negative')
+        if limit == 0:
+            return []
+
+        query = tuple(self._path_from_key(prefix))
+        width = len(query) + 1
+
+        # row[j] is the edit distance between the path of the node the row
+        # belongs to and query[:j]; in particular row[-1] is the distance
+        # between the path and the whole query.
+        root_row = list(range(width))
+        root_best = root_row[-1]
+
+        matches = []
+        if self._root.value is not _SENTINEL and root_best <= max_distance:
+            matches.append((root_best, self._key_from_path(()),
+                            self._root.value))
+
+        # Stack entries: (step, child node, parent's row, parent's best).
+        # ``best`` is the minimum distance among all prefixes of the current
+        # path, i.e. the distance reported for a key ending at that node.
+        stack = [(step, child, root_row, root_best, (step,))
+                 for step, child in _iteritems(self._root.children)]
+        while stack:
+            step, node, parent_row, parent_best, path = stack.pop()
+            row = [parent_row[0] + 1]
+            for j in range(1, width):
+                cost = 0 if step == query[j - 1] else 1
+                above = parent_row[j] + 1
+                left = row[j - 1] + 1
+                diag = parent_row[j - 1] + cost
+                row.append(diag if diag < (above if above < left
+                                           else left)
+                           else (above if above < left else left))
+            best = parent_best if parent_best < row[-1] else row[-1]
+            if node.value is not _SENTINEL and best <= max_distance:
+                matches.append((best, self._key_from_path(path), node.value))
+            # Descend further only if some extension of this path may still
+            # match.  That is the case when a prefix already seen is close
+            # enough (best <= max_distance, so every key below matches) or
+            # when some entry of the row is within max_distance: any
+            # alignment of a longer path to the query aligns this path to
+            # a prefix of the query at cost at least min(row), so if
+            # min(row) > max_distance no extension can qualify on its own
+            # and the whole subtree can be pruned.
+            if node.children and (best <= max_distance or
+                                  min(row) <= max_distance):
+                stack.extend((child_step, child, row, best,
+                              path + (child_step,))
+                             for child_step, child
+                             in _iteritems(node.children))
+
+        matches.sort(key=lambda match: (match[0], match[1]))
+        if limit is not None:
+            matches = matches[:limit]
+        return [(key, value) for _, key, value in matches]
+
     def __eq__(self, other):
         return self._root == other._root  # pylint: disable=protected-access
 
@@ -1247,7 +1357,7 @@ class StringTrie(Trie):
         return self._separator.join(path)
 
 
-class PrefixSet(_collections.MutableSet):  # pylint: disable=abstract-class-not-used
+class PrefixSet(_collections_abc.MutableSet):  # pylint: disable=abstract-class-not-used
     """A set of prefixes.
 
     :class:`pygtrie.PrefixSet` works similar to a normal set except it is said
