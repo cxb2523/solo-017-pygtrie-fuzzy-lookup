@@ -41,6 +41,12 @@ __copyright__ = 'Copyright 2014 Google Inc.'
 
 import collections as _collections
 
+try:
+    import collections.abc as _collections_abc
+except ImportError:
+    # Python 2.x keeps the abstract base classes directly in collections.
+    _collections_abc = _collections
+
 # Python 2.x and 3.x compatibility stuff
 if hasattr(dict, 'iteritems'):
     # pylint: disable=invalid-name
@@ -281,7 +287,7 @@ _NONE_PAIR = type('NonePair', (tuple,), {
 })((None, None))
 
 
-class Trie(_collections.MutableMapping):
+class Trie(_collections_abc.MutableMapping):
     """A trie implementation with dict interface plus some extensions.
 
     Keys used with the :class:`pygtrie.Trie` must be iterable, yielding hashable
@@ -980,6 +986,95 @@ class Trie(_collections.MutableMapping):
             pass
         return ret
 
+    def fuzzy_prefix_items(self, prefix, max_distance, limit=None):
+        """Finds items whose key has a prefix close to the given prefix.
+
+        Performs a fuzzy prefix search: an item matches if some prefix of
+        its key is within ``max_distance`` edits of ``prefix``.  Insertions,
+        deletions and substitutions each count as a single edit.  The
+        distance reported for an item is the smallest distance among all
+        prefixes of its key.
+
+        The search walks the trie and prunes subtries which cannot possibly
+        contain a match, so it does not degenerate into computing the edit
+        distance of every key in the trie.
+
+        Example:
+
+            >>> import pygtrie
+            >>> t = pygtrie.CharTrie()
+            >>> t.update({'cat': 1, 'cats': 2, 'car': 3, 'dog': 4})
+            >>> t.fuzzy_prefix_items('cat', 1)
+            [('cat', 1, 0), ('cats', 2, 0), ('car', 3, 1)]
+
+        Edge cases:
+
+        * With ``max_distance`` of zero this is equivalent to an exact
+          prefix search as performed by :func:`Trie.iteritems` with
+          a ``prefix`` argument, except no ``KeyError`` is raised when the
+          prefix matches no node -- an empty list is returned instead.
+        * An empty ``prefix`` matches every key with distance zero since
+          an empty path is a prefix of every key.
+        * An empty trie results in an empty list.
+
+        Args:
+            prefix: Prefix to search for.
+            max_distance: Maximum edit distance between a prefix of a key
+                and ``prefix`` for the item to be returned.  Must be
+                non-negative.
+            limit: If given, at most this many items are returned (the
+                ones with the smallest distance, then the smallest key).
+                Must be non-negative if given.
+
+        Returns:
+            A list of ``(key, value, distance)`` tuples sorted by distance
+            and then by key.
+
+        Raises:
+            ValueError: If ``max_distance`` or ``limit`` is negative.
+        """
+        if max_distance < 0:
+            raise ValueError('max_distance must be non-negative')
+        if limit is not None and limit < 0:
+            raise ValueError('limit must be non-negative')
+
+        query = tuple(self._path_from_key(prefix))
+        query_len = len(query)
+        # Levenshtein row for an empty path: distance to each query prefix.
+        root_row = list(range(query_len + 1))
+        results = []
+        # Iterative depth-first search so deep tries don't hit recursion
+        # limits.  Each entry is a (node, path, row, best) tuple where row
+        # is the Levenshtein row for path against query and best is the
+        # minimum of row[query_len] over all rows on the path from the root
+        # to the node, i.e. the distance of the best prefix of path.
+        stack = [(self._root, [], root_row, root_row[query_len])]
+        while stack:
+            node, path, row, best = stack.pop()
+            if node.value is not _SENTINEL and best <= max_distance:
+                results.append((self._key_from_path(path), node.value, best))
+            if best > max_distance and min(row) > max_distance:
+                # No prefix of any key in this subtrie can be within
+                # max_distance of the query: prefixes along the path from
+                # the root are all further than max_distance (best says so)
+                # and any extension of path is at least min(row) edits away,
+                # so the whole subtrie can be skipped.
+                continue
+            for step, child in _iteritems(node.children):
+                child_row = [row[0] + 1]
+                for col in range(1, query_len + 1):
+                    child_row.append(min(
+                            child_row[-1] + 1,
+                            row[col] + 1,
+                            row[col - 1] + (query[col - 1] != step)))
+                stack.append((child, path + [step], child_row,
+                              min(best, child_row[query_len])))
+
+        results.sort(key=lambda item: (item[2], item[0]))
+        if limit is not None:
+            del results[limit:]
+        return results
+
     def __eq__(self, other):
         return self._root == other._root  # pylint: disable=protected-access
 
@@ -1247,7 +1342,7 @@ class StringTrie(Trie):
         return self._separator.join(path)
 
 
-class PrefixSet(_collections.MutableSet):  # pylint: disable=abstract-class-not-used
+class PrefixSet(_collections_abc.MutableSet):  # pylint: disable=abstract-class-not-used
     """A set of prefixes.
 
     :class:`pygtrie.PrefixSet` works similar to a normal set except it is said
